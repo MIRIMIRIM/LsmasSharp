@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/LsmasSharp.Sample/LsmasSharp.Sample.csproj" />
+  <Project Path="src/LsmasSharp/LsmasSharp.csproj" />
+</Solution>

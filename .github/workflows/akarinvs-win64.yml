@@ -1,0 +1,153 @@
+name: akarinvs-win64
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/akarinvs-win64.yml
+      - scripts/**
+      - src/LsmasNative/**
+  pull_request:
+    paths:
+      - .github/workflows/akarinvs-win64.yml
+      - scripts/**
+      - src/LsmasNative/**
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build static win64 akarinvs
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      VARIANT: akarinvs
+      FFMPEG_REPO: https://github.com/AkarinVS/FFmpeg
+      FFMPEG_REF: lsmas
+      FFMPEG_COMMIT: 7cb67626773e3a7fae6520fb9a853d6bd905f7a6
+      LSMASHWORKS_REPO: https://github.com/AkarinVS/L-SMASH-Works.git
+      LSMASHWORKS_REF: master
+      LSMASHWORKS_COMMIT: 024ac718bca701e9175f663cbfd6589fc0c27fdb
+      FFMPEG_PREFIX: build-deps/ffmpeg-akarinvs-win64-local-mingw-static
+      FFMPEG_BUILDROOT: build-deps/_wsl/ffmpeg-lsmas-build-local-mingw
+      LSMASHWORKS_DIR: build-deps/L-SMASH-Works-AkarinVS
+      OUT_DIR: artifacts/native/win-x64-akarinvs
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: master
+
+      - name: Cache Zig
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            src/LsmasNative/.zig-cache
+          key: zig-${{ runner.os }}-${{ hashFiles('src/LsmasNative/build.zig', 'src/LsmasNative/*.c', 'src/LsmasNative/*.h') }}
+          restore-keys: |
+            zig-${{ runner.os }}-
+
+      - name: Cache MinGW toolchain
+        uses: actions/cache@v4
+        with:
+          path: build-deps/_wsl/ffmpeg-lsmas-toolchain-local-mingw
+          key: mingw-toolchain-${{ runner.os }}-${{ hashFiles('scripts/build_ffmpeg_lsmas_win64_local_mingw_static.sh') }}
+          restore-keys: |
+            mingw-toolchain-${{ runner.os }}-
+
+      - name: Cache FFmpeg prefix
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.FFMPEG_PREFIX }}
+            ${{ env.FFMPEG_BUILDROOT }}
+          key: ffmpeg-static-${{ env.VARIANT }}-${{ runner.os }}-${{ env.FFMPEG_COMMIT }}-${{ hashFiles('scripts/build_ffmpeg_lsmas_win64_local_mingw_static.sh') }}
+          restore-keys: |
+            ffmpeg-static-${{ env.VARIANT }}-${{ runner.os }}-${{ env.FFMPEG_COMMIT }}-
+
+      - name: Build FFmpeg prefix
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build_ffmpeg_lsmas_win64_local_mingw_static.sh \
+            "$FFMPEG_PREFIX" \
+            "$(nproc)" \
+            0 \
+            "$FFMPEG_REPO" \
+            "$FFMPEG_COMMIT"
+
+      - name: Pin FFmpeg metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$FFMPEG_REPO" > "$FFMPEG_PREFIX/lsmas-remote.txt"
+          printf '%s\n' "$FFMPEG_REF" > "$FFMPEG_PREFIX/lsmas-branch.txt"
+          printf '%s\n' "$FFMPEG_COMMIT" > "$FFMPEG_PREFIX/lsmas-commit.txt"
+          printf '%s\n' "$FFMPEG_COMMIT" | cut -c1-12 > "$FFMPEG_PREFIX/lsmas-commit-short.txt"
+
+      - name: Cache L-SMASH-Works checkout
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.LSMASHWORKS_DIR }}
+          key: lsmashworks-${{ env.VARIANT }}-${{ runner.os }}-${{ env.LSMASHWORKS_COMMIT }}
+          restore-keys: |
+            lsmashworks-${{ env.VARIANT }}-${{ runner.os }}-${{ env.LSMASHWORKS_COMMIT }}-
+
+      - name: Build lsmasnative
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build_lsmasnative_win64_zig.sh \
+            --lsmas-works-dir "$LSMASHWORKS_DIR" \
+            --lsmas-works-repo "$LSMASHWORKS_REPO" \
+            --lsmas-works-ref "$LSMASHWORKS_COMMIT" \
+            --lsmas-works-ref-label "$LSMASHWORKS_REF" \
+            --ffmpeg-prefix "$FFMPEG_PREFIX" \
+            --out-dir "$OUT_DIR" \
+            --release
+
+      - name: Write build manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "variant=$VARIANT"
+            echo "zig_version=$(zig version)"
+            echo "ffmpeg_repo=$FFMPEG_REPO"
+            echo "ffmpeg_ref=$FFMPEG_REF"
+            echo "ffmpeg_commit=$FFMPEG_COMMIT"
+            echo "lsmashworks_repo=$LSMASHWORKS_REPO"
+            echo "lsmashworks_ref=$LSMASHWORKS_REF"
+            echo "lsmashworks_commit=$LSMASHWORKS_COMMIT"
+          } > "$OUT_DIR/build-manifest.txt"
+
+      - name: Verify single DLL output
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$OUT_DIR/lsmasnative.dll"
+          test -f "$OUT_DIR/lsmasnative.pdb"
+          dll_count="$(find "$OUT_DIR" -maxdepth 1 -type f -name '*.dll' | wc -l)"
+          test "$dll_count" -eq 1
+          ls -la "$OUT_DIR"
+
+      - name: Upload lsmasnative artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lsmasnative-win64-akarinvs
+          path: |
+            ${{ env.OUT_DIR }}/lsmasnative.dll
+            ${{ env.OUT_DIR }}/lsmasnative.pdb
+            ${{ env.OUT_DIR }}/build-manifest.txt
+          if-no-files-found: error

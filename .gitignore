@@ -1,0 +1,25 @@
+# Local build artifacts / dependency checkouts (not versioned)
+build-deps/
+test-media/
+build/
+artifacts/
+packages/
+TestResults/
+*.binlog
+
+# Generated index files (embed absolute input paths)
+*.lwi
+
+# .NET build outputs
+**/bin/
+**/obj/
+
+# Zig build outputs
+.zig-cache/
+zig-out/
+
+# IDE
+.vs/
+.vscode/
+
+**/*.lscache
