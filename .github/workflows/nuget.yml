@@ -1,0 +1,36 @@
+name: Publish NuGet
+
+on:
+  workflow_dispatch:
+
+env:
+  DOTNET_VERSION: 10.0.x
+  SOLUTION_PATH: LsmasSharp.slnx
+  PACKAGE_PROJECT: src/LsmasSharp/LsmasSharp.csproj
+  PACKAGE_OUTPUT: artifacts/nuget
+
+jobs:
+  pack:
+    name: pack
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore ${{ env.SOLUTION_PATH }}
+
+      - name: Pack
+        run: |
+          dotnet pack ${{ env.PACKAGE_PROJECT }} --configuration Release --output ${{ env.PACKAGE_OUTPUT }}
+
+      - name: Push to nuget.org
+        run: dotnet nuget push "${{ env.PACKAGE_OUTPUT }}"/*.nupkg --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
