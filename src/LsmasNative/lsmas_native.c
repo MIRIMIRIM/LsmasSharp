@@ -1030,6 +1030,79 @@ static lsmas_rational32_t to_rational32( AVRational r )
     return o;
 }
 
+static float rational_to_float( AVRational r )
+{
+    return r.den ? (float)r.num / (float)r.den : 0.0f;
+}
+
+#if LSMAS_LSW_VARIANT_HOE
+static int dovi_range_contains( size_t total, size_t offset, size_t size )
+{
+    return offset <= total && total - offset >= size;
+}
+
+static void fill_dovi_reshape_component(
+    lsmas_dovi_reshape_component_t *dst,
+    const AVDOVIReshapingCurve *src,
+    const AVDOVIRpuDataHeader *header )
+{
+    if( !dst || !src || !header )
+        return;
+
+    memset( dst, 0, sizeof(*dst) );
+
+    uint8_t num_pivots = src->num_pivots;
+    if( num_pivots > 9 )
+        num_pivots = 9;
+    dst->num_pivots = num_pivots;
+
+    int bl_bit_depth = header->bl_bit_depth > 0 ? header->bl_bit_depth : 12;
+    if( bl_bit_depth > 30 )
+        bl_bit_depth = 12;
+    float pivot_scale = 1.0f / (float)((1u << bl_bit_depth) - 1u);
+    for( int i = 0; i < num_pivots; i++ )
+        dst->pivots[i] = pivot_scale * (float)src->pivots[i];
+
+    int coef_log2_denom = header->coef_log2_denom;
+    if( coef_log2_denom < 0 || coef_log2_denom > 30 )
+        coef_log2_denom = 0;
+    float coeff_scale = 1.0f / (float)(1u << coef_log2_denom);
+    int pieces = num_pivots > 0 ? num_pivots - 1 : 0;
+    if( pieces > 8 )
+        pieces = 8;
+
+    for( int i = 0; i < pieces; i++ )
+    {
+        dst->method[i] = (uint8_t)src->mapping_idc[i];
+        switch( src->mapping_idc[i] )
+        {
+            case AV_DOVI_MAPPING_POLYNOMIAL:
+                for( int k = 0; k < 3; k++ )
+                    dst->poly_coeffs[i][k] = k <= src->poly_order[i]
+                        ? coeff_scale * (float)src->poly_coef[i][k]
+                        : 0.0f;
+                break;
+            case AV_DOVI_MAPPING_MMR:
+            {
+                uint8_t mmr_order = src->mmr_order[i];
+                if( mmr_order > 3 )
+                    mmr_order = 3;
+                dst->mmr_order[i] = mmr_order;
+                dst->mmr_constant[i] = coeff_scale * (float)src->mmr_constant[i];
+                for( int j = 0; j < mmr_order; j++ )
+                {
+                    for( int k = 0; k < 7; k++ )
+                        dst->mmr_coeffs[i][j][k] = coeff_scale * (float)src->mmr_coef[i][j][k];
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+}
+#endif
+
 static int div_round_up_i32( int value, int divisor )
 {
     if( divisor <= 1 )
@@ -1057,12 +1130,10 @@ static int side_data_type_to_avframe_type( lsmas_video_frame_side_data_type_t ty
             *out_type = AV_FRAME_DATA_DYNAMIC_HDR_PLUS;
             return 1;
 #endif
-#ifdef AV_FRAME_DATA_DOVI_METADATA
+#if LSMAS_LSW_VARIANT_HOE
         case LSMAS_FRAME_SIDE_DATA_DOVI_METADATA:
             *out_type = AV_FRAME_DATA_DOVI_METADATA;
             return 1;
-#endif
-#ifdef AV_FRAME_DATA_DOVI_RPU_BUFFER
         case LSMAS_FRAME_SIDE_DATA_DOVI_RPU:
             *out_type = AV_FRAME_DATA_DOVI_RPU_BUFFER;
             return 1;
@@ -1142,7 +1213,7 @@ static int fill_video_format_info_from_pix_fmt( enum AVPixelFormat pix_fmt, int 
             if( comp->plane != p )
                 continue;
             if( components < 4 )
-                plane->component_shift[components] = comp->shift;
+                plane->component_shift[components] = comp->shift + comp->offset * 8;
             components++;
             if( comp->step > max_component_step )
                 max_component_step = comp->step;
@@ -3417,6 +3488,85 @@ LSMAS_NATIVE_API int lsmas_video_frame_get_side_data(
     if( out_size )
         *out_size = (int32_t)sd->size;
     return 1;
+}
+
+LSMAS_NATIVE_API int lsmas_video_frame_get_dovi_metadata(
+    const lsmas_video_frame_t *frame,
+    lsmas_dovi_metadata_t *out_metadata,
+    char **error_message
+)
+{
+    if( out_metadata )
+        memset( out_metadata, 0, sizeof(*out_metadata) );
+
+    if( !frame || !frame->frame || !out_metadata )
+    {
+        set_error_message( error_message, "frame/out_metadata is NULL." );
+        return -1;
+    }
+
+#if !LSMAS_LSW_VARIANT_HOE
+    (void)frame;
+    return 1;
+#else
+    AVFrameSideData *sd = av_frame_get_side_data( frame->frame, AV_FRAME_DATA_DOVI_METADATA );
+    if( !sd || !sd->data )
+        return 1;
+    if( sd->size < sizeof(AVDOVIMetadata) )
+    {
+        set_error_message( error_message, "Dolby Vision metadata side data is too small." );
+        return -1;
+    }
+
+    const AVDOVIMetadata *metadata = (const AVDOVIMetadata *)sd->data;
+    size_t total = sd->size;
+    if( !dovi_range_contains( total, metadata->header_offset, sizeof(AVDOVIRpuDataHeader) )
+        || !dovi_range_contains( total, metadata->mapping_offset, sizeof(AVDOVIDataMapping) )
+        || !dovi_range_contains( total, metadata->color_offset, sizeof(AVDOVIColorMetadata) ) )
+    {
+        set_error_message( error_message, "Dolby Vision metadata side data has invalid offsets." );
+        return -1;
+    }
+
+    const AVDOVIRpuDataHeader *header = av_dovi_get_header( metadata );
+    const AVDOVIDataMapping *mapping = av_dovi_get_mapping( metadata );
+    const AVDOVIColorMetadata *color = av_dovi_get_color( metadata );
+    if( !header || !mapping || !color )
+    {
+        set_error_message( error_message, "Dolby Vision metadata is incomplete." );
+        return -1;
+    }
+
+    out_metadata->disable_residual_flag = header->disable_residual_flag != 0;
+    out_metadata->bl_bit_depth = header->bl_bit_depth;
+    out_metadata->coefficient_log2_denom = header->coef_log2_denom;
+    if( !header->disable_residual_flag )
+        return 0;
+
+    out_metadata->valid = 1;
+    for( int i = 0; i < 3; i++ )
+        out_metadata->nonlinear_offset[i] = rational_to_float( color->ycc_to_rgb_offset[i] );
+    for( int i = 0; i < 9; i++ )
+    {
+        out_metadata->nonlinear[i] = rational_to_float( color->ycc_to_rgb_matrix[i] );
+        out_metadata->linear[i] = rational_to_float( color->rgb_to_lms_matrix[i] );
+    }
+    for( int c = 0; c < 3; c++ )
+        fill_dovi_reshape_component( &out_metadata->comp[c], &mapping->curves[c], header );
+
+    out_metadata->source_min_pq = (float)color->source_min_pq / 4095.0f;
+    out_metadata->source_max_pq = (float)color->source_max_pq / 4095.0f;
+
+    AVDOVIDmData *l1 = av_dovi_find_level( metadata, 1 );
+    if( l1 )
+    {
+        out_metadata->has_l1 = 1;
+        out_metadata->max_pq_y = (float)l1->l1.max_pq / 4095.0f;
+        out_metadata->avg_pq_y = (float)l1->l1.avg_pq / 4095.0f;
+    }
+
+    return 0;
+#endif
 }
 
 LSMAS_NATIVE_API void lsmas_video_release_frame( lsmas_video_frame_t *frame )
