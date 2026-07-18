@@ -2,16 +2,16 @@ name: akarinvs-win64
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - .github/workflows/akarinvs-win64.yml
-      - scripts/**
-      - src/LsmasNative/**
-  pull_request:
-    paths:
-      - .github/workflows/akarinvs-win64.yml
-      - scripts/**
-      - src/LsmasNative/**
+  # push:
+  #   paths:
+  #     - .github/workflows/akarinvs-win64.yml
+  #     - scripts/**
+  #     - src/LsmasNative/**
+  # pull_request:
+  #   paths:
+  #     - .github/workflows/akarinvs-win64.yml
+  #     - scripts/**
+  #     - src/LsmasNative/**
 
 permissions:
   contents: read
