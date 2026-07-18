@@ -37,7 +37,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -47,7 +47,7 @@ jobs:
           version: master
 
       - name: Cache Zig
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cache/zig
@@ -57,7 +57,7 @@ jobs:
             zig-${{ runner.os }}-
 
       - name: Cache MinGW toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build-deps/_wsl/ffmpeg-lsmas-toolchain-local-mingw
           key: mingw-toolchain-${{ runner.os }}-${{ hashFiles('scripts/build_ffmpeg_lsmas_win64_local_mingw_static.sh') }}
@@ -66,7 +66,7 @@ jobs:
 
       - name: Cache FFmpeg prefix
         id: ffmpeg-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ${{ env.FFMPEG_PREFIX }}
@@ -97,7 +97,7 @@ jobs:
           printf '%s\n' "$FFMPEG_COMMIT" | cut -c1-12 > "$FFMPEG_PREFIX/lsmas-commit-short.txt"
 
       - name: Cache L-SMASH-Works checkout
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ env.LSMASHWORKS_DIR }}
           key: lsmashworks-${{ env.VARIANT }}-${{ runner.os }}-${{ env.LSMASHWORKS_COMMIT }}
@@ -143,7 +143,7 @@ jobs:
           ls -la "$OUT_DIR"
 
       - name: Upload lsmasnative artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lsmasnative-win64-akarinvs
           path: |
