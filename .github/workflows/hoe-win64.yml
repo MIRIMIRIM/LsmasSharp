@@ -26,10 +26,10 @@ jobs:
       VARIANT: hoe
       FFMPEG_REPO: https://github.com/HomeOfAviSynthPlusEvolution/FFmpeg
       FFMPEG_REF: custom-patches-for-lsmashsource
-      FFMPEG_COMMIT: 805074e2691e6c84323ddd44dd919ef359924eb5
+      FFMPEG_COMMIT: 39c24f36247f370864ce86ebdf2aa936151f4bfc
       LSMASHWORKS_REPO: https://github.com/HomeOfAviSynthPlusEvolution/L-SMASH-Works.git
       LSMASHWORKS_REF: master
-      LSMASHWORKS_COMMIT: 0079a06ee384061ecdadd0de03df4e0493dd56ab
+      LSMASHWORKS_COMMIT: a83318210c183c8ebbe703d975ffc76fb499ef07
       FFMPEG_PREFIX: build-deps/ffmpeg-hoe-win64-local-mingw-static
       FFMPEG_BUILDROOT: build-deps/_wsl/ffmpeg-lsmas-build-local-mingw
       LSMASHWORKS_DIR: build-deps/L-SMASH-Works-HOE
