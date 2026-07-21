@@ -153,6 +153,8 @@ struct lsmas_handle_t
     int rgba_scaler_inited;
     lw_video_scaler_handler_t gray8_scaler;
     int gray8_scaler_inited;
+    lw_video_scaler_handler_t yuv420p8_scaler;
+    int yuv420p8_scaler_inited;
     char preferred_decoder_names_buf[PREFERRED_DECODER_NAMES_BUFSIZE]; /* video */
     const char **preferred_decoder_names;
     int prefer_hw_decoder; /* HOE variant expects an int* with stable lifetime */
@@ -1340,6 +1342,25 @@ static void init_gray8_scaler_if_needed( lsmas_handle_t *h )
     h->gray8_scaler.sws_ctx = NULL;
 
     h->gray8_scaler_inited = 1;
+}
+
+static void init_yuv420p8_scaler_if_needed( lsmas_handle_t *h )
+{
+    if( !h || h->yuv420p8_scaler_inited )
+        return;
+
+    memset( &h->yuv420p8_scaler, 0, sizeof(h->yuv420p8_scaler) );
+    h->yuv420p8_scaler.scaler_flags = SWS_ACCURATE_RND | SWS_BICUBIC;
+    h->yuv420p8_scaler.frame_prop_change_flags = 0;
+    h->yuv420p8_scaler.input_width = 0;
+    h->yuv420p8_scaler.input_height = 0;
+    h->yuv420p8_scaler.input_pixel_format = AV_PIX_FMT_NONE;
+    h->yuv420p8_scaler.output_pixel_format = AV_PIX_FMT_YUV420P;
+    h->yuv420p8_scaler.input_colorspace = AVCOL_SPC_UNSPECIFIED;
+    h->yuv420p8_scaler.input_yuv_range = AVCOL_RANGE_UNSPECIFIED;
+    h->yuv420p8_scaler.sws_ctx = NULL;
+
+    h->yuv420p8_scaler_inited = 1;
 }
 
 static void apply_ff_loglevel( int32_t ff_loglevel )
@@ -2535,6 +2556,11 @@ LSMAS_NATIVE_API void lsmas_video_close( lsmas_handle_t *handle )
     handle->gray8_scaler.sws_ctx = NULL;
     handle->gray8_scaler_inited = 0;
 
+    if( handle->yuv420p8_scaler_inited && handle->yuv420p8_scaler.sws_ctx )
+        sws_freeContext( handle->yuv420p8_scaler.sws_ctx );
+    handle->yuv420p8_scaler.sws_ctx = NULL;
+    handle->yuv420p8_scaler_inited = 0;
+
     lwlibav_audio_free_decode_handler_ptr( &handle->adhp );
     lwlibav_audio_free_output_handler_ptr( &handle->aohp );
     lw_freep( &handle->lwh.file_path );
@@ -2932,6 +2958,172 @@ static int64_t calc_gray8_padded16_required( int width, int height, int stride )
     return (int64_t)stride * (int64_t)rounded_height;
 }
 
+static int64_t calc_yuv420p8_required( int width, int height, int y_stride )
+{
+    if( width <= 0 || height <= 0 || (width & 1) != 0 || (height & 1) != 0 || y_stride < width || (y_stride & 1) != 0 )
+        return -1;
+    const int uv_stride = y_stride / 2;
+    return (int64_t)y_stride * (int64_t)height
+         + 2 * (int64_t)uv_stride * (int64_t)(height / 2);
+}
+
+static void copy_plane_rows(
+    uint8_t *dst,
+    int dst_stride,
+    const uint8_t *src,
+    int src_stride,
+    int row_bytes,
+    int height
+)
+{
+    if( dst_stride == row_bytes && src_stride == row_bytes )
+    {
+        memcpy( dst, src, (size_t)row_bytes * (size_t)height );
+        return;
+    }
+
+    for( int y = 0; y < height; y++ )
+        memcpy( dst + (int64_t)y * (int64_t)dst_stride,
+                src + (int64_t)y * (int64_t)src_stride,
+                (size_t)row_bytes );
+}
+
+static int is_yuv420p8_direct_copy_format( enum AVPixelFormat fmt )
+{
+    switch( fmt )
+    {
+        case AV_PIX_FMT_YUV420P:
+        case AV_PIX_FMT_YUVJ420P:
+        case AV_PIX_FMT_YUVA420P:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int get_yuv420p16le_shift( enum AVPixelFormat fmt, int *out_shift )
+{
+    switch( fmt )
+    {
+        case AV_PIX_FMT_YUV420P9LE:
+        case AV_PIX_FMT_YUVA420P9LE:
+            *out_shift = 1;
+            return 1;
+        case AV_PIX_FMT_YUV420P10LE:
+        case AV_PIX_FMT_YUVA420P10LE:
+            *out_shift = 2;
+            return 1;
+        case AV_PIX_FMT_YUV420P12LE:
+            *out_shift = 4;
+            return 1;
+        case AV_PIX_FMT_YUV420P14LE:
+            *out_shift = 6;
+            return 1;
+        case AV_PIX_FMT_YUV420P16LE:
+        case AV_PIX_FMT_YUVA420P16LE:
+            *out_shift = 8;
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int get_yuv420sp8_order( enum AVPixelFormat fmt, int *out_v_first )
+{
+    switch( fmt )
+    {
+        case AV_PIX_FMT_NV12:
+            *out_v_first = 0;
+            return 1;
+        case AV_PIX_FMT_NV21:
+            *out_v_first = 1;
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int is_yuv420sp16le_msb_format( enum AVPixelFormat fmt )
+{
+    switch( fmt )
+    {
+        case AV_PIX_FMT_P010LE:
+#if LIBAVUTIL_VERSION_MAJOR >= 58
+        case AV_PIX_FMT_P012LE:
+#endif
+        case AV_PIX_FMT_P016LE:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static void convert_plane16le_to8(
+    uint8_t *restrict dst,
+    int dst_stride,
+    const uint8_t *restrict src,
+    int src_stride,
+    int width,
+    int height,
+    int shift
+)
+{
+    for( int y = 0; y < height; y++ )
+    {
+        uint8_t *restrict out_row = dst + (int64_t)y * (int64_t)dst_stride;
+        const uint16_t *restrict in_row = (const uint16_t *)(src + (int64_t)y * (int64_t)src_stride);
+        for( int x = 0; x < width; x++ )
+            out_row[x] = (uint8_t)(in_row[x] >> shift);
+    }
+}
+
+static void deinterleave_yuv420sp8(
+    uint8_t *restrict dst_u,
+    uint8_t *restrict dst_v,
+    int dst_stride,
+    const uint8_t *restrict src_uv,
+    int src_stride,
+    int chroma_width,
+    int chroma_height,
+    int v_first
+)
+{
+    for( int y = 0; y < chroma_height; y++ )
+    {
+        uint8_t *restrict out_u = dst_u + (int64_t)y * (int64_t)dst_stride;
+        uint8_t *restrict out_v = dst_v + (int64_t)y * (int64_t)dst_stride;
+        const uint8_t *restrict in_uv = src_uv + (int64_t)y * (int64_t)src_stride;
+        for( int x = 0; x < chroma_width; x++ )
+        {
+            out_u[x] = in_uv[2 * x + v_first];
+            out_v[x] = in_uv[2 * x + (1 - v_first)];
+        }
+    }
+}
+
+static void deinterleave_yuv420sp16le_msb_to8(
+    uint8_t *restrict dst_u,
+    uint8_t *restrict dst_v,
+    int dst_stride,
+    const uint8_t *restrict src_uv,
+    int src_stride,
+    int chroma_width,
+    int chroma_height
+)
+{
+    for( int y = 0; y < chroma_height; y++ )
+    {
+        uint8_t *restrict out_u = dst_u + (int64_t)y * (int64_t)dst_stride;
+        uint8_t *restrict out_v = dst_v + (int64_t)y * (int64_t)dst_stride;
+        const uint16_t *restrict in_uv = (const uint16_t *)(src_uv + (int64_t)y * (int64_t)src_stride);
+        for( int x = 0; x < chroma_width; x++ )
+        {
+            out_u[x] = (uint8_t)(in_uv[2 * x] >> 8);
+            out_v[x] = (uint8_t)(in_uv[2 * x + 1] >> 8);
+        }
+    }
+}
+
 static int is_gray8_direct_copy_format( enum AVPixelFormat fmt )
 {
     switch( fmt )
@@ -3134,6 +3326,151 @@ static int64_t copy_frame_gray8(
                dst_data,
                dst_linesize );
 
+    return required;
+}
+
+static int64_t copy_frame_yuv420p8(
+    lsmas_handle_t *handle,
+    const AVFrame *av_frame,
+    uint8_t *dst,
+    int32_t dst_y_stride,
+    char **error_message
+)
+{
+    if( !handle || !av_frame )
+    {
+        set_error_message( error_message, "handle/frame is NULL." );
+        return -1;
+    }
+
+    const int width = av_frame->width;
+    const int height = av_frame->height;
+    if( width <= 0 || height <= 0 || (width & 1) != 0 || (height & 1) != 0 )
+    {
+        set_error_message( error_message, "YUV420P8 output requires positive even frame dimensions." );
+        return -1;
+    }
+
+    const int y_stride = dst_y_stride > 0 ? dst_y_stride : width;
+    const int64_t required = calc_yuv420p8_required( width, height, y_stride );
+    if( required < 0 )
+    {
+        set_error_message( error_message, "YUV420P8 dst_stride must be even and at least the visible width." );
+        return -1;
+    }
+    if( !dst )
+        return required;
+
+    const int uv_stride = y_stride / 2;
+    uint8_t *dst_data[4] = {
+        dst,
+        dst + (int64_t)y_stride * (int64_t)height,
+        dst + (int64_t)y_stride * (int64_t)height + (int64_t)uv_stride * (int64_t)(height / 2),
+        NULL
+    };
+    int dst_linesize[4] = { y_stride, uv_stride, uv_stride, 0 };
+
+    if( is_yuv420p8_direct_copy_format( (enum AVPixelFormat)av_frame->format )
+        && av_frame->data[0] && av_frame->data[1] && av_frame->data[2]
+        && av_frame->linesize[0] >= width
+        && av_frame->linesize[1] >= width / 2
+        && av_frame->linesize[2] >= width / 2 )
+    {
+        copy_plane_rows( dst_data[0], y_stride,
+                         av_frame->data[0], av_frame->linesize[0],
+                         width, height );
+        copy_plane_rows( dst_data[1], uv_stride,
+                         av_frame->data[1], av_frame->linesize[1],
+                         width / 2, height / 2 );
+        copy_plane_rows( dst_data[2], uv_stride,
+                         av_frame->data[2], av_frame->linesize[2],
+                         width / 2, height / 2 );
+        return required;
+    }
+
+    /* NV12/NV21 already has the target sampling and depth. Copy Y and split UV/VU
+     * directly instead of paying for a general swscale conversion. */
+    {
+        int v_first = 0;
+        if( get_yuv420sp8_order( (enum AVPixelFormat)av_frame->format, &v_first )
+            && av_frame->data[0] && av_frame->data[1]
+            && av_frame->linesize[0] >= width
+            && av_frame->linesize[1] >= width )
+        {
+            copy_plane_rows( dst_data[0], y_stride,
+                             av_frame->data[0], av_frame->linesize[0],
+                             width, height );
+            deinterleave_yuv420sp8( dst_data[1], dst_data[2], uv_stride,
+                                    av_frame->data[1], av_frame->linesize[1],
+                                    width / 2, height / 2, v_first );
+            return required;
+        }
+    }
+
+    /* Planar high-bit-depth 4:2:0 stores samples LSB-aligned in 16-bit words.
+     * Truncating the low bits matches the existing GRAY8 fast-path semantics. */
+    {
+        int shift = 0;
+        if( get_yuv420p16le_shift( (enum AVPixelFormat)av_frame->format, &shift )
+            && av_frame->data[0] && av_frame->data[1] && av_frame->data[2]
+            && av_frame->linesize[0] >= width * 2
+            && av_frame->linesize[1] >= width
+            && av_frame->linesize[2] >= width )
+        {
+            convert_plane16le_to8( dst_data[0], y_stride,
+                                   av_frame->data[0], av_frame->linesize[0],
+                                   width, height, shift );
+            convert_plane16le_to8( dst_data[1], uv_stride,
+                                   av_frame->data[1], av_frame->linesize[1],
+                                   width / 2, height / 2, shift );
+            convert_plane16le_to8( dst_data[2], uv_stride,
+                                   av_frame->data[2], av_frame->linesize[2],
+                                   width / 2, height / 2, shift );
+            return required;
+        }
+    }
+
+    /* P010/P012/P016 stores 16-bit Y and interleaved UV with meaningful bits in
+     * the MSBs. Taking the top byte produces 8-bit I420 without resampling. */
+    if( is_yuv420sp16le_msb_format( (enum AVPixelFormat)av_frame->format )
+        && av_frame->data[0] && av_frame->data[1]
+        && av_frame->linesize[0] >= width * 2
+        && av_frame->linesize[1] >= width * 2 )
+    {
+        convert_plane16le_to8( dst_data[0], y_stride,
+                               av_frame->data[0], av_frame->linesize[0],
+                               width, height, 8 );
+        deinterleave_yuv420sp16le_msb_to8( dst_data[1], dst_data[2], uv_stride,
+                                           av_frame->data[1], av_frame->linesize[1],
+                                           width / 2, height / 2 );
+        return required;
+    }
+
+    init_yuv420p8_scaler_if_needed( handle );
+    lw_log_handler_t *lhp = lwlibav_video_get_log_handler( handle->vdhp );
+    if( !lhp )
+    {
+        set_error_message( error_message, "Invalid internal state (no log handler)." );
+        return -1;
+    }
+    if( update_scaler_configuration_if_needed( &handle->yuv420p8_scaler, lhp, av_frame ) < 0
+        || !handle->yuv420p8_scaler.sws_ctx )
+    {
+        set_error_message( error_message, handle->last_error ? handle->last_error : "Failed to initialize YUV420P8 scaler." );
+        return -1;
+    }
+
+    if( sws_scale( handle->yuv420p8_scaler.sws_ctx,
+                   (const uint8_t *const *)av_frame->data,
+                   av_frame->linesize,
+                   0,
+                   height,
+                   dst_data,
+                   dst_linesize ) != height )
+    {
+        set_error_message( error_message, "Failed to convert frame to YUV420P8." );
+        return -1;
+    }
     return required;
 }
 
@@ -3940,6 +4277,33 @@ static int fill_converted_frame_buffer_layout(
             required = calc_gray8_padded16_required( width, height, stride );
             break;
         }
+        case LSMAS_VIDEO_FRAME_OUTPUT_YUV420P8:
+        {
+            int y_stride = dst_stride > 0 ? dst_stride : width;
+            if( width <= 0 || height <= 0 || (width & 1) != 0 || (height & 1) != 0
+                || y_stride < width || (y_stride & 1) != 0 )
+            {
+                set_error_message( error_message, "YUV420P8 requires positive even dimensions and an even dst_stride >= width." );
+                return -1;
+            }
+            const int uv_stride = y_stride / 2;
+            pix_fmt = AV_PIX_FMT_YUV420P;
+            plane_count = 3;
+            plane_width[0] = width;
+            plane_height[0] = height;
+            plane_stride[0] = y_stride;
+            plane_offset[0] = 0;
+            plane_width[1] = width / 2;
+            plane_height[1] = height / 2;
+            plane_stride[1] = uv_stride;
+            plane_offset[1] = (int64_t)y_stride * (int64_t)height;
+            plane_width[2] = width / 2;
+            plane_height[2] = height / 2;
+            plane_stride[2] = uv_stride;
+            plane_offset[2] = plane_offset[1] + (int64_t)uv_stride * (int64_t)(height / 2);
+            required = calc_yuv420p8_required( width, height, y_stride );
+            break;
+        }
         case LSMAS_VIDEO_FRAME_OUTPUT_BGRA:
         case LSMAS_VIDEO_FRAME_OUTPUT_RGBA:
         {
@@ -4095,6 +4459,9 @@ LSMAS_NATIVE_API int64_t lsmas_video_get_frame(
             break;
         case LSMAS_VIDEO_FRAME_OUTPUT_GRAY8_PADDED16:
             ret = copy_frame_gray8_padded16( handle, av_frame, dst, effective_dst_stride, error_message );
+            break;
+        case LSMAS_VIDEO_FRAME_OUTPUT_YUV420P8:
+            ret = copy_frame_yuv420p8( handle, av_frame, dst, effective_dst_stride, error_message );
             break;
         default:
             set_error_message( error_message, "Unsupported frame output format." );

@@ -14,7 +14,7 @@
 #endif
 
 #define LSMAS_NATIVE_API_VERSION_MAJOR 1
-#define LSMAS_NATIVE_API_VERSION_MINOR 0
+#define LSMAS_NATIVE_API_VERSION_MINOR 1
 #define LSMAS_NATIVE_API_VERSION_PATCH 0
 #define LSMAS_NATIVE_MAKE_API_VERSION(major, minor, patch) (((major) << 16) | ((minor) << 8) | (patch))
 #define LSMAS_NATIVE_API_VERSION LSMAS_NATIVE_MAKE_API_VERSION( \
@@ -277,11 +277,14 @@ typedef enum lsmas_video_frame_output_format_t
     /* Copy decoded frame pixels without color conversion into a tight av_image layout. */
     LSMAS_VIDEO_FRAME_OUTPUT_NATIVE = 0,
 
-    /* Converted/canonical caller-buffer outputs. */
+    /* Converted/canonical caller-buffer outputs.
+     * YUV420P8 is contiguous I420 (Y, U, V). High-bit-depth 4:2:0 fast paths
+     * preserve the most significant 8 bits; other formats use swscale. */
     LSMAS_VIDEO_FRAME_OUTPUT_GRAY8          = 1,
     LSMAS_VIDEO_FRAME_OUTPUT_BGRA           = 2,
     LSMAS_VIDEO_FRAME_OUTPUT_RGBA           = 3,
-    LSMAS_VIDEO_FRAME_OUTPUT_GRAY8_PADDED16 = 4
+    LSMAS_VIDEO_FRAME_OUTPUT_GRAY8_PADDED16 = 4,
+    LSMAS_VIDEO_FRAME_OUTPUT_YUV420P8       = 5
 } lsmas_video_frame_output_format_t;
 
 typedef struct lsmas_video_frame_buffer_layout_t
@@ -485,6 +488,7 @@ LSMAS_NATIVE_API int lsmas_video_get_frame_props(
 /* Unified caller-allocated frame output.
  * If dst is NULL, returns the required destination buffer footprint and optionally fills out_layout.
  * For converted outputs, dst_stride<=0 selects the default tight/common stride.
+ * For YUV420P8, dst_stride is the Y stride; it must be even, and U/V use dst_stride/2.
  * For NATIVE, dst_stride is ignored and the output is a tight av_image layout with align=1.
  * AVFrame acquisition remains a separate API because it has refcounted lifetime/ownership semantics. */
 LSMAS_NATIVE_API int64_t lsmas_video_get_frame(
